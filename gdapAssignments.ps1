@@ -64,7 +64,8 @@ try {
     # Authenticate to tenant using MSAL.PS and the "vdwegen - GDAP Management App"
     try {
         $msalTokenSplat = @{
-            TenantId = (whoami /upn).Split('@')[1]
+            TenantId = if ($Env:OS -eq "Windows_NT" -OR $IsWindows) { (whoami /upn).Split('@')[1] } else { Read-Host -Prompt "Enter TenantId or verified domain" }
+            TenantId = 
             Scopes = "DelegatedAdminRelationship.ReadWrite.All"
             ClientId = "7146d3ef-b8bf-4d5f-adde-b1b402906326" # Note, I created my own multi-tenant app for this for convenience sake. See the blogpost on the base requirements to use this script. {Insert blogpost link later}
         }
