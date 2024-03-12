@@ -109,9 +109,13 @@ $badRoles = @(
 try {
     try {
         # Retrieve all tenants if $tenants array is empty
-        if (!$tenants) {
+        if ($tenants) {
+            # Add a filter here
+            $tenants = (Invoke-RestMethod -Method "GET" -Headers $graphHeader -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminCustomers").value.tenantId 
+        } else {
             # Page this
             $tenants = (Invoke-RestMethod -Method "GET" -Headers $graphHeader -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminCustomers").value.tenantId
+
         }
     } catch {
         throw "Failed to retrieve tenants: $($_.Exception.Message)"
