@@ -5,8 +5,10 @@ try {
     try {
         $msalTokenSplat = @{
             TenantId = if ($Env:OS -eq "Windows_NT" -OR $IsWindows) { (whoami /upn).Split('@')[1] } else { Read-Host -Prompt "Enter TenantId or verified domain" }
-            Scopes = "DelegatedAdminRelationship.ReadWrite.All"
+            Scopes = "https://graph.microsoft.com/DelegatedAdminRelationship.ReadWrite.All" # This doesn't pass through correctly yet
             ClientId = "7146d3ef-b8bf-4d5f-adde-b1b402906326" # Note, I created my own multi-tenant app for this for convenience sake. See the blogpost on the base requirements to use this script. {Insert blogpost link later}
+            #UseEmbeddedWebView = $false # Webview2 can't read device compliance, only use when your CA requires device compliance
+            #RedirectUri = 'http://localhost'
         }
 
         $graphToken = (Get-MsalToken @msalTokenSplat  -Interactive).CreateAuthorizationHeader()
@@ -26,7 +28,6 @@ try {
 #endregion
 
 #region static data
-
 $roles = @(
     @{
         displayName = "Application Administrator"
@@ -75,10 +76,29 @@ $roles = @(
     @{
         displayName = "Privileged Authentication Administrator"
         roleId = "7be44c8a-adaf-4e2a-84d6-ab2649e08a13"
+    }
+)
+
+$badRoles = @(
+    @{
+        displayName = "Global Administrator"
+        roleId = "62e90394-69f5-4237-9190-012177145e10"
+        message = "Relationship {relationship} contains the Global Administrator role and will not be able to auto extend. It is recommended to create a new relationship with the tenant"
     },
     @{
-        displayName = "Global Reader"
-        roleId = "f2ef992c-3afb-46b9-b7cf-a126ee74c451"
+        displayName = "Directory Synchronization Accounts"
+        roleId = "d29b2b05-8046-44ba-8758-1e26182fcf32"
+        message = "Relationship {relationship} contains the Directory Synchronization Accounts role. It is HIGHLY recommended to create a new relationship with the tenant. This role should never be available."
+    },
+    @{
+        displayName = "Partner Tier1 Support"
+        roleId = "4ba39ca4-527c-499a-b93d-d9b492c50246"
+        message = "Relationship {relationship} contains the Partner Tier1 Support role. It is HIGHLY recommended to create a new relationship with the tenant. This role should never be available."
+    },
+    @{
+        displayName = "Partner Tier2 Support"
+        roleId = "e00e864a-17c5-4a4b-9c06-f5b95a8d5bd8"
+        message = "Relationship {relationship} contains the Partner Tier2 Support role. It is HIGHLY recommended to create a new relationship with the tenant. This role should never be available."
     }
 )
 
@@ -101,7 +121,8 @@ try {
         # 
         # Page this
         $me = (Invoke-RestMethod -Method GET -Uri 'https://graph.microsoft.com/beta/me?$select=UserPrincipalName' -Headers $graphHeader)
-        $memberGroups = (Invoke-RestMethod -Method GET -Uri 'https://graph.microsoft.com/beta/me/memberOf?$select=id,displayName,isAssignableToRole' -Headers $graphHeader).value
+        $memberGroups = (Invoke-RestMethod -Method GET -Uri 'https://graph.microsoft.com/beta/me/transitiveMemberOf?$select=id,displayName,isAssignableToRole' -Headers $graphHeader).value
+        $adminAgentsGroup = (Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=displayName eq 'AdminAgents'" -Headers $graphHeader).value
     } catch {
         throw "Failed to retrieve group membership: $($_.Exception.Message)"
     }
@@ -110,19 +131,6 @@ try {
         # Retrieve all active relationships
         # Page this
         $relationships = (Invoke-RestMethod -Method "GET" -Headers $graphHeader -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships?`$filter=(status eq 'active')").value
-    
-        #
-        $totalAvailableRoles = $relationships.accessDetails.unifiedRoles.roleDefinitionId | Sort-Object -Unique
-
-        # Check if any roles are missing in ALL relationships
-        $compareTotalRoles = Compare-Object -ReferenceObject $roles.roleId -DifferenceObject $totalAvailableRoles
-        if ($compareTotalRoles) {
-            $missingRoles = ($compareTotalRoles | Where-Object { $_.SideIndicator -eq "<=" }).InputObject | ForEach-Object {
-                $roles | Where-Object { $_.roleId -eq $_ }
-            }
-
-            $missingRoles | ForEach-Object { Write-Host "Role $($_.displayName) is missing from ALL relationships. For optimal functionality you will want to create new relationships for all your tenants." -ForegroundColor Red }
-        }
     } catch {
         throw "Failed to retrieve relationships: $($_.Exception.Message)"
     }
@@ -136,45 +144,112 @@ try {
 #region process pre-reqs
 
 try {
-    # Validate if user is a member of AdminAgents
-    $AdminAgents = $memberGroups | Where-Object { $_.displayName -eq "AdminAgents" }
-    if (!$AdminAgents) {
-        Write-Host "User $($me.UserPrincipalName) is not a member of AdminAgents" -ForegroundColor Red
-        # Add result to array
-    } else {
-        Write-Host "User $($me.UserPrincipalName) is a member of the AdminAgents group" -ForegroundColor Green
+    try {
+        # Validate if user is a member of AdminAgents
+        $AdminAgents = $memberGroups | Where-Object { $_.displayName -eq "AdminAgents" }
+        if (!$AdminAgents) {
+            Write-Host "User $($me.UserPrincipalName) is not a member of AdminAgents" -ForegroundColor Red
+            # Add result to array as recommendation
+        } else {
+            Write-Host "User $($me.UserPrincipalName) is a member of the AdminAgents group" -ForegroundColor Green
+        }
+    } catch {
+        throw $($_.Exception.Message)
     }
 
-    # Validate that relationships contain the correct roles
+    try {
+        $totalAvailableRoles = $relationships.accessDetails.unifiedRoles.roleDefinitionId | Sort-Object -Unique
+
+        # Check if any roles are missing in ALL relationships
+        $compareTotalRoles = Compare-Object -ReferenceObject $roles.roleId -DifferenceObject $totalAvailableRoles
+        if ($compareTotalRoles) {
+            $missingRoles = ($compareTotalRoles | Where-Object { $_.SideIndicator -eq "<=" }).InputObject | ForEach-Object {
+                $missingRole = $_
+                $roles | Where-Object { $_.roleId -eq $missingRole }
+            }
+
+            if ($missingRoles) {
+                $missingRoles | ForEach-Object { Write-Host "Role $($_.displayName) is missing from ALL relationships. For optimal functionality you will want to create new relationships for all your tenants." -ForegroundColor Red }
+                # We don't add to array here, we do that later when we go relationship by relationship. This is just a "You're fucked" message.
+            }
+        }
+    } catch {
+        throw $($_.Exception.Message)
+    }
+} catch {
+    throw $($_.Exception.Message)
+}
+
+try {
+    $processedArray = [system.collections.generic.list[PSCustomObject]]::new()
+    # Validate that relationships contain the correct roles and are assigned properly
     foreach ($tenantRelationship in $relationships) {
 
+        $relResult = [pscustomobject]@{
+            tenantDisplayName = $tenantRelationship.customer.displayName
+            tenantId = $tenantRelationship.customer.tenantId
+            relationshipDisplayName = $($tenantRelationship.displayName)
+            relationshipId = $($tenantRelationship.id)
+            autoExtendEnabled = ''
+            recommendations = [pscustomobject]@{
+                missingRoles = [array]@()
+                badRoles = [array]@()
+                missingAssignedRoles = [array]@()
+                otherIssues = [system.collections.generic.list[PSCustomObject]]::new()
+            }
+        }
+
+        # Define a few variables
         $tenantDisplayName = $tenantRelationship.customer.displayName
         $tenantId = $tenantRelationship.customer.tenantId
 
-        # Check for missing roles and presence of GA
+        # Get all AccessAssignments for the relationship
+        $accessAssignments = (Invoke-RestMethod -Method "GET" -Headers $graphHeader -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$($tenantRelationship.id)/accessAssignments?`$filter=(status eq 'active')").value
+
+        # Check for missing roles
         try {
             $relationshipRoles = $tenantRelationship.accessDetails.unifiedRoles.roleDefinitionId
             $compareRoles = Compare-Object -ReferenceObject $roles.roleId -DifferenceObject $relationshipRoles
             if ($null -eq $compareRoles) {
+                ### This doesn't work properly
                 Write-Host "Relationship $($tenantRelationship.displayName) contains all the needed roles"
             } else {
                 $missingRoles = ($compareRoles | Where-Object { $_.SideIndicator -eq "<=" }).InputObject | ForEach-Object {
-                    $roles | Where-Object { $_.roleId -eq $_ }
+                    $missingRole = $_
+                    $roles | Where-Object { $_.roleId -eq $missingRole }
                 }
 
-                $missingRoles | ForEach-Object {
-                    Write-Host "Role $($_.displayName) is missing from relationship $($tenantRelationship.displayName)" -ForegroundColor Red
-                    # Add result to array
+                if ($missingRoles) {
+                    $missingRoles | ForEach-Object {
+                        Write-Host "Role $($_.displayName) is missing from relationship $($tenantRelationship.displayName)" -ForegroundColor Red
+                    }
+                    # Add result to array as recommendation
+                    $relResult.recommendations.missingRoles = $missingRoles
                 }
-            }
-
-            # Check for GA
-            if ("62e90394-69f5-4237-9190-012177145e10" -in $relationshipRoles) {
-                Write-Warning "Relationship $($tenantRelationship.displayName) contains the Global Administrator role and will not be able to auto extend. It is recommended to create a new relationship with the tenant"
-                # Add result to array
             }
         } catch {
-            throw $($_.Exception.Message)
+            throw "Error while processing missing roles: $($_.Exception.Message)"
+        }
+
+        try {
+            # Check for "bad" roles
+            $compareBadTotalRoles = Compare-Object -ReferenceObject $relationshipRoles -DifferenceObject $badRoles.roleId -IncludeEqual
+            if ($compareBadTotalRoles) {
+                $foundBadRoles = ($compareBadTotalRoles | Where-Object { $_.SideIndicator -eq "==" }).InputObject | ForEach-Object {
+                    $badRole = $_
+                    $badRoles | Where-Object { $_.roleId -eq $badRole } | Select-Object -Property roleId,displayName
+                }
+
+                if ($foundBadRoles) {
+                    $foundBadRoles | ForEach-Object {
+                        Write-Host $($_.message -Replace("{relationship}",$($tenantRelationship.displayName))) -ForegroundColor Red
+                    }
+                    # Add result to array as recommendation
+                    $relResult.recommendations.badRoles = $foundBadRoles
+                }
+            }
+        } catch {
+            throw "Error while processing bad roles: $($_.Exception.Message)"
         }
 
         # Auto extend
@@ -185,33 +260,78 @@ try {
                 #}
                 #(Invoke-RestMethod -Method PATCH -body (ConvertTo-Json -InputObject $autoExtendBody) -Uri "https://graph.microsoft.com/v1.0/tenantRelationships/delegatedAdminRelationships/$($tenantRelationship.id)" -Headers $header -ContentType "application/json")
                 Write-Warning "Auto-extend is not set on relationship $($tenantRelationship.displayName)"
+                # Add result to array as recommendation
+                $relResult.autoExtendEnabled = $false
+            } else {
+                $relResult.autoExtendEnabled = $true
             }
         } catch {
-            throw $($_.Exception.Message)
+            throw "Error while processing auto extend: $($_.Exception.Message)"
         }
 
         #
         try {
-            $accessAssignments = (Invoke-RestMethod -Method "GET" -Headers $graphHeader -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$($tenantRelationship.id)/accessAssignments?`$filter=(status eq 'active')").value
-        
             $totalAssignedRoles = $accessAssignments.accessDetails.unifiedRoles.roleDefinitionId | Sort-Object -Unique
 
             # Check if any roles are missing in ALL accessAssignments
-            $compareTotalAssignedRoles = Compare-Object -ReferenceObject $roles.roleId -DifferenceObject $totalAssignedRoles
-            if ($compareTotalAssignedRoles) {
-                $missingAssignedRoles = ($compareTotalAssignedRoles | Where-Object { $_.SideIndicator -eq "<=" }).InputObject | ForEach-Object {
-                    $roles | Where-Object { $_.roleId -eq $_ }
+            if ($totalAssignedRoles) {
+                $compareTotalAssignedRoles = Compare-Object -ReferenceObject $roles.roleId -DifferenceObject $totalAssignedRoles
+                if ($compareTotalAssignedRoles) {
+                    $missingAssignedRoles = ($compareTotalAssignedRoles | Where-Object { $_.SideIndicator -eq "<=" }).InputObject | ForEach-Object {
+                        $missingRole = $_
+                        $roles | Where-Object { $_.roleId -eq $missingRole }
+                    }
+    
+                    if ($missingAssignedRoles) {
+                        $missingAssignedRoles | ForEach-Object {
+                            Write-Host "Role $($_.displayName) has not been mapped on relationship $($tenantRelationship.displayName)." -ForegroundColor Red
+                        }
+                        # Add result to array as recommendation
+                        $relResult.recommendations.missingAssignedRoles = $missingAssignedRoles
+                    }
                 }
-
-                $missingAssignedRoles | ForEach-Object { Write-Host "Role $($_.displayName) has not been mapped on relationship $($tenantRelationship.displayName)." -ForegroundColor Red }
-                # add Result to array
+            } else {
+                Write-warning "$($tenantRelationship.displayName) on $($tenantDisplayName) has something funky"
             }
         } catch {
-            throw $($_.Exception.Message)
+            throw "Error while processing missing roles in all assignments: $($_.Exception.Message)"
         }
+
+        try {
+            # Check if more than one role is mapped per group
+            foreach ($accessAssignment in $accessAssignments) {
+                if ($accessAssignment.accessDetails.unifiedRoles.Count -gt 1) {
+                    Write-Warning "More than one role is mapped in assignment $($accessAssignment.accessContainer.accessContainerId) on relationship $($tenantRelationship.displayName), this is not recommended"
+                    $relResult.recommendations.otherIssues.Add(
+                        @{
+                            groupId = $($accessAssignment.accessContainer.accessContainerId)
+                            Issue = "More than one role assigned"
+                        }
+                    )
+                }
+
+                if ($accessAssignment.accessContainer.accessContainerId -eq $adminAgentsGroup.id) {
+                    Write-Warning "AdminAgents group is mapped in assignment $($accessAssignment.accessContainer.accessContainerId) on relationship $($tenantRelationship.displayName), this is not recommended"
+                    # Add result to array as recommendation
+                    $relResult.recommendations.otherIssues.Add(
+                        @{
+                            groupId = $($accessAssignment.accessContainer.accessContainerId)
+                            Issue = "Mapped group is AdminAgents"
+                        }
+                    )
+                }
+            }
+        } catch {
+            throw "Error while processing more than one role assigned to group: $($_.Exception.Message)"
+        }
+
+        $processedArray.Add($relResult)
     }
 } catch {
     throw $($_.Exception.Message)
 }
 
 #endregion
+
+# very WIP
+$processedArray | ConvertTo-Json -depth 20 | Out-File "C:\temp\gdapstatus.json" -Force
