@@ -5,7 +5,7 @@ try {
     try {
         $msalTokenSplat = @{
             TenantId = if ($Env:OS -eq "Windows_NT" -OR $IsWindows) { (whoami /upn).Split('@')[1] } else { Read-Host -Prompt "Enter TenantId or verified domain" }
-            Scopes = "https://graph.microsoft.com/DelegatedAdminRelationship.ReadWrite.All https://graph.microsoft.com/Group.Read.All" # This doesn't pass through correctly yet
+            #Scopes = "https://graph.microsoft.com/DelegatedAdminRelationship.ReadWrite.All https://graph.microsoft.com/Group.Read.All" # This doesn't pass through correctly yet
             ClientId = "7146d3ef-b8bf-4d5f-adde-b1b402906326" # Note, I created my own multi-tenant app for this for convenience sake. See the blogpost on the base requirements to use this script. {Insert blogpost link later}
             #UseEmbeddedWebView = $false # Webview2 can't read device compliance, only use when your CA requires device compliance
             #RedirectUri = 'http://localhost'
