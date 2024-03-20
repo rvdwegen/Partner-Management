@@ -11,7 +11,7 @@ try {
             #RedirectUri = 'http://localhost'
         }
 
-        $graphToken = (Get-MsalToken @msalTokenSplat  -Interactive).CreateAuthorizationHeader()
+        $graphToken = (Get-MsalToken @msalTokenSplat -Interactive).CreateAuthorizationHeader()
 
         $graphHeader = @{
             "Authorization"          = $graphToken
