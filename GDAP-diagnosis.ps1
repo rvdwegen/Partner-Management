@@ -103,6 +103,25 @@ $badRoles = @(
 
 #endregion
 
+#region functions
+
+function Save-File ([string]$filename) {
+    [void][System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms")
+
+    $SaveFileDialog = New-Object System.Windows.Forms.SaveFileDialog
+    $SaveFileDialog.initialDirectory = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+    $SaveFileDialog.filter = 'JSON (*.json)|*.json'
+    $SaveFileDialog.FileName = "$filename.json"
+    $result = $SaveFileDialog.ShowDialog((New-Object System.Windows.Forms.Form -Property @{TopMost = $true }))
+
+    return [pscustomobject]@{
+        path = $SaveFileDialog.filename
+        status = $result
+    }
+}
+
+#endregion
+
 #region retrieve data
 
 try {
