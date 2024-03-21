@@ -121,9 +121,9 @@ try {
     }
 
     try {
-        # 
-        # Page this
         $me = (Invoke-RestMethod -Method GET -Uri 'https://graph.microsoft.com/beta/me?$select=UserPrincipalName' -Headers $graphHeader)
+        # Possibly just get all groups with membership?
+        # Page this
         $memberGroups = (Invoke-RestMethod -Method GET -Uri 'https://graph.microsoft.com/beta/me/transitiveMemberOf?$select=id,displayName,isAssignableToRole' -Headers $graphHeader).value
         $adminAgentsGroup = (Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=displayName eq 'AdminAgents'" -Headers $graphHeader).value
     } catch {
@@ -152,7 +152,7 @@ try {
         $AdminAgents = $memberGroups | Where-Object { $_.displayName -eq "AdminAgents" }
         if (!$AdminAgents) {
             Write-Host "User $($me.UserPrincipalName) is not a member of AdminAgents" -ForegroundColor Red
-            # Add result to array as recommendation
+            # Add result to array as recommendation?
         } else {
             Write-Host "User $($me.UserPrincipalName) is a member of the AdminAgents group" -ForegroundColor Green
         }
@@ -182,9 +182,14 @@ try {
 } catch {
     throw $($_.Exception.Message)
 }
+#endregion
+
+#region process data
 
 try {
+    # Define our results array
     $processedArray = [system.collections.generic.list[PSCustomObject]]::new()
+
     # Validate that relationships contain the correct roles and are assigned properly
     foreach ($tenantRelationship in $relationships) {
 
@@ -193,30 +198,29 @@ try {
             tenantId = $tenantRelationship.customer.tenantId
             relationshipDisplayName = $($tenantRelationship.displayName)
             relationshipId = $($tenantRelationship.id)
-            autoExtendEnabled = ''
-            recommendations = [pscustomobject]@{
-                missingRoles = [array]@()
-                badRoles = [array]@()
-                missingAssignedRoles = [array]@()
-                otherIssues = [system.collections.generic.list[PSCustomObject]]::new()
-            }
+            # recommendations = [pscustomobject]@{
+            #     missingRoles = [array]@()
+            #     badRoles = [array]@()
+            #     missingAssignedRoles = [array]@()
+            #     otherIssues = [system.collections.generic.list[PSCustomObject]]::new()
+            # }
+            recommendations = [system.collections.generic.list[PSCustomObject]]::new()
         }
 
         # Define a few variables
         $tenantDisplayName = $tenantRelationship.customer.displayName
         $tenantId = $tenantRelationship.customer.tenantId
 
+        Write-Host "Processing relationship $($tenantRelationship.displayName) for tenant $($tenantDisplayName) | $($tenantId)"
+
         # Get all AccessAssignments for the relationship
-        $accessAssignments = (Invoke-RestMethod -Method "GET" -Headers $graphHeader -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$($tenantRelationship.id)/accessAssignments?`$filter=(status eq 'active')").value
+        $accessAssignments = (Invoke-RestMethod -Method "GET" -Headers $graphHeader -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$($tenantRelationship.id)/accessAssignments?`$filter=(status eq 'active')" -Verbose:$false).value
 
         # Check for missing roles
         try {
             $relationshipRoles = $tenantRelationship.accessDetails.unifiedRoles.roleDefinitionId
             $compareRoles = Compare-Object -ReferenceObject $roles.roleId -DifferenceObject $relationshipRoles
-            if ($null -eq $compareRoles) {
-                ### This doesn't work properly
-                Write-Host "Relationship $($tenantRelationship.displayName) contains all the needed roles"
-            } else {
+            if ($compareRoles) {
                 $missingRoles = ($compareRoles | Where-Object { $_.SideIndicator -eq "<=" }).InputObject | ForEach-Object {
                     $missingRole = $_
                     $roles | Where-Object { $_.roleId -eq $missingRole }
@@ -224,10 +228,17 @@ try {
 
                 if ($missingRoles) {
                     $missingRoles | ForEach-Object {
-                        Write-Host "Role $($_.displayName) is missing from relationship $($tenantRelationship.displayName)" -ForegroundColor Red
+                        # Add result to array as recommendation
+                        $relResult.recommendations.Add(
+                            [pscustomobject]@{
+                                type = "missingRole"
+                                role = $($_.displayName)
+                                roleId = $($_.roleId)
+                                message = "Role $($_.displayName) is missing from relationship $($tenantRelationship.displayName). Replace this relationship with a new one that contains the correct roles."
+                            }
+                        )
+                        #Write-Warning "Role $($_.displayName) is missing from relationship $($tenantRelationship.displayName)"
                     }
-                    # Add result to array as recommendation
-                    $relResult.recommendations.missingRoles = $missingRoles
                 }
             }
         } catch {
@@ -245,10 +256,17 @@ try {
 
                 if ($foundBadRoles) {
                     $foundBadRoles | ForEach-Object {
-                        Write-Host $($_.message -Replace("{relationship}",$($tenantRelationship.displayName))) -ForegroundColor Red
+                        # Add result to array as recommendation
+                        $relResult.recommendations.Add(
+                            [pscustomobject]@{
+                                type = "badRole"
+                                role = $($_.displayName)
+                                roleId = $($_.roleId)
+                                message = "Role $($_.displayName) is included on relationship $($tenantRelationship.displayName). Replace this relationship with a new one that ONLY contains the correct roles."
+                            }
+                        )
+                        #Write-Warning $($_.message -Replace("{relationship}",$($tenantRelationship.displayName)))
                     }
-                    # Add result to array as recommendation
-                    $relResult.recommendations.badRoles = $foundBadRoles
                 }
             }
         } catch {
@@ -262,11 +280,16 @@ try {
                 #    autoExtendDuration = 'P730D'
                 #}
                 #(Invoke-RestMethod -Method PATCH -body (ConvertTo-Json -InputObject $autoExtendBody) -Uri "https://graph.microsoft.com/v1.0/tenantRelationships/delegatedAdminRelationships/$($tenantRelationship.id)" -Headers $header -ContentType "application/json")
-                Write-Warning "Auto-extend is not set on relationship $($tenantRelationship.displayName)"
                 # Add result to array as recommendation
-                $relResult.autoExtendEnabled = $false
+                $relResult.recommendations.Add(
+                    [pscustomobject]@{
+                        type = "autoExtend"
+                        message = "Auto-extend is not enabled on this relationship"
+                    }
+                )
+                #Write-Warning "Auto-extend is not set on relationship $($tenantRelationship.displayName)"
             } else {
-                $relResult.autoExtendEnabled = $true
+                #$relResult.autoExtendEnabled = $true
             }
         } catch {
             throw "Error while processing auto extend: $($_.Exception.Message)"
@@ -287,42 +310,53 @@ try {
     
                     if ($missingAssignedRoles) {
                         $missingAssignedRoles | ForEach-Object {
-                            Write-Host "Role $($_.displayName) has not been mapped on relationship $($tenantRelationship.displayName)." -ForegroundColor Red
+                            # Add result to array as recommendation
+                            $relResult.recommendations.Add(
+                                [pscustomobject]@{
+                                    type = "missingAssignedRole"
+                                    role = $($_.displayName)
+                                    roleId = $($_.roleId)
+                                    message = "Role $($_.displayName) is included on relationship $($tenantRelationship.displayName) but not assigned to a role group."
+                                }
+                            )
+                            #Write-Warning "Role $($_.displayName) has not been mapped on relationship $($tenantRelationship.displayName)."
                         }
-                        # Add result to array as recommendation
-                        $relResult.recommendations.missingAssignedRoles = $missingAssignedRoles
                     }
                 }
             } else {
-                Write-warning "$($tenantRelationship.displayName) on $($tenantDisplayName) has something funky"
+                Write-Warning "$($tenantRelationship.displayName) on $($tenantDisplayName) has something funky"
             }
         } catch {
             throw "Error while processing missing roles in all assignments: $($_.Exception.Message)"
         }
 
         try {
-            # Check if more than one role is mapped per group
             foreach ($accessAssignment in $accessAssignments) {
+                # Check if more than one role is mapped per group
                 if ($accessAssignment.accessDetails.unifiedRoles.Count -gt 1) {
-                    Write-Warning "More than one role is mapped in assignment $($accessAssignment.accessContainer.accessContainerId) on relationship $($tenantRelationship.displayName), this is not recommended"
-                    $relResult.recommendations.otherIssues.Add(
-                        @{
-                            groupId = $($accessAssignment.accessContainer.accessContainerId)
-                            Issue = "More than one role assigned"
+                    # Add result to array as recommendation
+                    $relResult.recommendations.Add(
+                        [pscustomobject]@{
+                            type = "otherIssue"
+                            message = "More than one role is mapped in assignment $($accessAssignment.accessContainer.accessContainerId) on relationship $($tenantRelationship.displayName), this is not recommended"
                         }
                     )
                 }
 
+                # Check if the mapped group is AdminAgents
                 if ($accessAssignment.accessContainer.accessContainerId -eq $adminAgentsGroup.id) {
-                    Write-Warning "AdminAgents group is mapped in assignment $($accessAssignment.accessContainer.accessContainerId) on relationship $($tenantRelationship.displayName), this is not recommended"
                     # Add result to array as recommendation
-                    $relResult.recommendations.otherIssues.Add(
-                        @{
-                            groupId = $($accessAssignment.accessContainer.accessContainerId)
-                            Issue = "Mapped group is AdminAgents"
+                    $relResult.recommendations.Add(
+                        [pscustomobject]@{
+                            type = "otherIssue"
+                            message = "AdminAgents group is mapped in assignment $($accessAssignment.accessContainer.accessContainerId) on relationship $($tenantRelationship.displayName), this is not recommended"
                         }
                     )
                 }
+
+                # Do a thing to check if the mapped groups contain weird shit
+
+                # Do a thing to check if too many roles have been assigned
             }
         } catch {
             throw "Error while processing more than one role assigned to group: $($_.Exception.Message)"
