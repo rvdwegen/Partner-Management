@@ -1,7 +1,7 @@
 #region Authentication
 
 try {
-    # Authenticate to tenant using MSAL.PS and the "vdwegen - GDAP Management App"
+    # Authenticate to tenant using MSAL.PS and the "vdwegen - GDAP Management" app
     try {
         $msalTokenSplat = @{
             #TenantId = if ($Env:OS -eq "Windows_NT" -OR $IsWindows) { (whoami /upn).Split('@')[1] } else { Read-Host -Prompt "Enter TenantId or verified domain" }
