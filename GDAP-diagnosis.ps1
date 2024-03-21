@@ -1,3 +1,18 @@
+#region modules
+
+$modules = @('MSAL.PS')
+$currentModules = Get-Module
+
+$modules | ForEach-Object {
+    if ($currentModules.Name -notcontains $_) {
+        Install-Module -Name $_
+    } else {
+        Write-Host "Module $($_) is present" -ForegroundColor Green
+    }
+}
+
+#endregion
+
 #region Authentication
 
 try {
